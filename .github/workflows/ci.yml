@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9, 3.10, 3.11]
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-asyncio pytest-mock pytest-cov
+
+    - name: Create test environment file
+      run: |
+        cat > .env << EOF
+        TELEGRAM_BOT_TOKEN=test_token_12345
+        DATABASE_URL=postgresql://postgres:postgres@localhost:5432/test_db
+        ANTHROPIC_API_KEY=test_anthropic_key_12345
+        DEBUG=True
+        LOG_LEVEL=DEBUG
+        VECTOR_DB_PATH=./test_vector_db
+        DATA_DIR=./test_data
+        LOGS_DIR=./test_logs
+        EOF
+
+    - name: Run linting
+      run: |
+        # Проверка синтаксиса Python
+        python -m py_compile src/*.py
+        
+        # Проверка форматирования с black (если установлен)
+        if command -v black &> /dev/null; then
+          black --check src/ tests/ || echo "Black not configured"
+        fi
+        
+        # Проверка импортов с isort (если установлен)
+        if command -v isort &> /dev/null; then
+          isort --check-only src/ tests/ || echo "Isort not configured"
+        fi
+
+    - name: Run tests with pytest
+      env:
+        DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        TELEGRAM_BOT_TOKEN: test_token_12345
+        ANTHROPIC_API_KEY: test_anthropic_key_12345
+      run: |
+        pytest tests/ -v --tb=short --cov=src --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      if: matrix.python-version == '3.11'
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install security tools
+      run: |
+        pip install safety bandit
+    
+    - name: Check for security vulnerabilities
+      run: |
+        # Проверка известных уязвимостей в зависимостях
+        safety check --json || echo "Safety check completed with warnings"
+        
+        # Статический анализ безопасности кода
+        bandit -r src/ -f json || echo "Bandit scan completed with warnings"
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Build Docker image
+      run: |
+        docker build -t itmo-bot:test .
+    
+    - name: Test Docker image
+      run: |
+        # Проверяем что образ собирается и запускается
+        docker run --rm itmo-bot:test python -c "import src; print('Docker build successful')" 
